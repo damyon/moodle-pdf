@@ -300,11 +300,6 @@ class page_requirements_manager {
             if (!empty($page->cm->id)) {
                 $params['cmid'] = $page->cm->id;
             }
-            // Strings for drag and drop.
-            $this->strings_for_js(array('movecontent',
-                                        'aftercontent',
-                                        'emptydragdropregion'),
-                                  'moodle');
             $page->requires->yui_module('moodle-core-blocks', 'M.core_blocks.init_dragdrop', array($params), null, true);
         }
     }
@@ -663,7 +658,7 @@ class page_requirements_manager {
                                                         array('nofilesavailable', 'repository'), array('norepositoriesavailable', 'repository'),
                                                         array('fileexistsdialogheader', 'repository'), array('fileexistsdialog_editor', 'repository'),
                                                         array('fileexistsdialog_filemanager', 'repository'), array('renameto', 'repository'),
-                                                        array('referencesexist', 'repository'), array('edit', 'moodle')
+                                                        array('referencesexist', 'repository'), array('select', 'repository')
                                                     ));
                     break;
                 case 'core_comment':
