@@ -1,0 +1,862 @@
+YUI.add('moodle-assignfeedback_editpdf-editor', function (Y, NAME) {
+
+// This file is part of Moodle - http://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <http://www.gnu.org/licenses/>.
+
+/**
+ * Provides an in browser PDF editor.
+ *
+ * @module moodle-assignfeedback_editpdf-editor
+ */
+
+// Globals
+var AJAXBASE = M.cfg.wwwroot + '/mod/assign/feedback/editpdf/ajax.php',
+    CSS = {
+        DIALOGUE : 'assignfeedback_editpdf_widget'
+    },
+    SELECTOR = {
+        PREVIOUSBUTTON : '.' + CSS.DIALOGUE + ' .navigate-previous-button',
+        NEXTBUTTON : '.' + CSS.DIALOGUE + ' .navigate-next-button',
+        PAGESELECT : '.' + CSS.DIALOGUE + ' .navigate-page-select',
+        LOADINGICON : '.' + CSS.DIALOGUE + ' .loading',
+        DRAWINGREGION : '.' + CSS.DIALOGUE + ' .drawingregion',
+        DRAWINGCANVAS : '.' + CSS.DIALOGUE + ' .drawingcanvas',
+        CANCEL : '.' + CSS.DIALOGUE + ' .cancelbutton',
+        SAVE : '.' + CSS.DIALOGUE + ' .savebutton',
+        DIALOGUE : '.' + CSS.DIALOGUE
+    },
+    COLOUR = {
+        'red' : 'rgb(255,176,176)',
+        'green' : 'rgb(176,255,176)',
+        'blue' : 'rgb(208,208,255)',
+        'white' : 'rgb(255,255,255)',
+        'yellow' : 'rgb(255,255,176)'
+    },
+    CLICKTIMEOUT = 300;
+
+/**
+ * Drawable
+ *
+ * @namespace M.assignfeedback_editpdf.editor
+ * @class Drawable
+ */
+Drawable = function() {
+    /**
+     * Array of Y.Shape
+     * @property type
+     * @type Y.Shape[]
+     * @public
+     */
+    this.shapes = [];
+
+    /**
+     * Array of Y.Node
+     * @property type
+     * @type Y.Node[]
+     * @public
+     */
+    this.nodes = [];
+};
+
+/**
+ * EDITOR
+ * This is an in browser PDF editor.
+ *
+ * @namespace M.assignfeedback_editpdf.editor
+ * @class Editor
+ * @constructor
+ * @extends Y.Base
+ */
+EDITOR = function() {
+    EDITOR.superclass.constructor.apply(this, arguments);
+};
+EDITOR.prototype = {
+
+    // Instance variables.
+    /**
+     * The dialogue used for all action menu displays.
+     * @property type
+     * @type M.core.dialogue
+     * @protected
+     */
+    dialogue : null,
+
+    /**
+     * The number of pages in the pdf.
+     * @property type
+     * @type int
+     * @protected
+     */
+    pagecount : 0,
+
+    /**
+     * The active page in the editor.
+     * @property type
+     * @type int
+     * @protected
+     */
+    currentpage : 0,
+
+    /**
+     * A list of page objects. Each page has a list of comments and annotations.
+     * @property type
+     * @type array
+     * @protected
+     */
+    pages : [],
+
+    /**
+     * The yui node for the loading icon.
+     * @property type
+     * @type Y.Node
+     * @protected
+     */
+    loadingicon : null,
+
+    /**
+     * Image object of the current page image.
+     * @property type
+     * @type Image
+     * @protected
+     */
+    pageimage : null,
+
+    /**
+     * YUI Graphic class for drawing shapes.
+     * @property type
+     * @type Y.Graphic
+     * @protected
+     */
+    graphic : null,
+
+    /**
+     * Current colour.
+     * @property type
+     * @type string
+     * @protected
+     */
+    currentcolour : 'yellow',
+
+    /**
+     * Selected tool
+     * @property type
+     * @type string
+     * @protected
+     */
+    currenttool : 'comment',
+
+    /**
+     * Info about the current edit operation.
+     * @property type
+     * @type object containing start and end points (x and y)
+     * @protected
+     */
+    currentedit : {},
+
+    /**
+     * Current drawable.
+     * @property type
+     * @type Drawable (or false)
+     * @protected
+     */
+    currentdrawable : false,
+
+    /**
+     * Current drawables.
+     * @property type
+     * @type array(Drawable)
+     * @protected
+     */
+    drawables : [],
+
+    /**
+     * Called during the initialisation process of the object.
+     * @method initializer
+     */
+    initializer : function() {
+        var link, deletelink;
+        Y.log('Initialising M.assignfeedback_editpdf.editor');
+        link = Y.one('#' + this.get('linkid'));
+
+        link.on('click', this.link_handler, this);
+        link.on('key', this.link_handler, 'down:13', this);
+
+        Y.log(this.get('deletelinkid'));
+        deletelink = Y.one('#' + this.get('deletelinkid'));
+        deletelink.on('click', this.delete_link_handler, this);
+        deletelink.on('key', this.delete_link_handler, 'down:13', this);
+
+        this.currentedit.start = false;
+        this.currentedit.end = false;
+    },
+
+    /**
+     * Called to open the pdf editing dialogue.
+     * @method link_handler
+     */
+    link_handler : function(e) {
+        var drawingcanvas;
+        Y.log('Launch pdf editor');
+        e.preventDefault();
+
+        if (!this.dialogue) {
+            this.dialogue = new M.core.dialogue({
+                headerContent: this.get('header'),
+                bodyContent: this.get('body'),
+                footerContent: this.get('footer'),
+                width: '840px',
+                visible: true
+            });
+
+            this.dialogue.centerDialogue();
+            // Add custom class for styling.
+            this.dialogue.get('boundingBox').addClass(CSS.DIALOGUE);
+
+            this.loadingicon = Y.one(SELECTOR.LOADINGICON);
+
+            drawingcanvas = Y.one(SELECTOR.DRAWINGCANVAS);
+            this.graphic = new Y.Graphic({render : SELECTOR.DRAWINGCANVAS});
+
+            drawingcanvas.on('mousedown', this.edit_start, this);
+            drawingcanvas.on('mousemove', this.edit_move, this);
+            drawingcanvas.on('mouseup', this.edit_end, this);
+
+        } else {
+            this.dialogue.show();
+        }
+
+        this.load_all_pages();
+    },
+
+    /**
+     * Called to delete the last generated pdf.
+     * @method link_handler
+     */
+    delete_link_handler : function(e) {
+        var downloadlink,
+            deletelink;
+
+        Y.log('Delete generated pdf');
+        e.preventDefault();
+
+        var ajaxurl = AJAXBASE,
+            config;
+
+        config = {
+            method: 'get',
+            context: this,
+            sync: false,
+            data : {
+                'sesskey' : M.cfg.sesskey,
+                'action' : 'deletefeedbackdocument',
+                'userid' : this.get('userid'),
+                'attemptnumber' : this.get('attemptnumber'),
+                'assignmentid' : this.get('assignmentid')
+            },
+            on: {
+                success: function() {
+                    downloadlink = Y.one('#' + this.get('downloadlinkid'));
+                    deletelink = Y.one('#' + this.get('deletelinkid'));
+
+                    downloadlink.addClass('hidden');
+                    deletelink.addClass('hidden');
+                },
+                failure: function(tid, response) {
+                    return M.core.exception(response.responseText);
+                }
+            }
+        };
+
+        Y.io(ajaxurl, config);
+
+    },
+
+    /**
+     * Called to load the information and annotations for all pages.
+     * @method load_all_pages
+     */
+    load_all_pages : function() {
+        var ajaxurl = AJAXBASE,
+            config;
+
+        config = {
+            method: 'get',
+            context: this,
+            sync: false,
+            data : {
+                'sesskey' : M.cfg.sesskey,
+                'action' : 'loadallpages',
+                'userid' : this.get('userid'),
+                'attemptnumber' : this.get('attemptnumber'),
+                'assignmentid' : this.get('assignmentid')
+            },
+            on: {
+                success: function(tid, response) {
+                    this.all_pages_loaded(response.responseText);
+                },
+                failure: function(tid, response) {
+                    return M.core.exception(response.responseText);
+                }
+            }
+        };
+
+        Y.io(ajaxurl, config);
+    },
+
+    /**
+     * The info about all pages in the pdf has been returned.
+     * @param string The ajax response as text.
+     * @protected
+     * @method all_pages_loaded
+     */
+    all_pages_loaded : function(responsetext) {
+        var data;
+
+        try {
+            data = Y.JSON.parse(responsetext);
+        } catch (e) {
+             this.dialogue.hide();
+             return new M.core.exception(e);
+        }
+
+        this.pagecount = data.pagecount;
+        this.pages = data.pages;
+
+        // Update the ui.
+        this.setup_navigation();
+        this.change_page();
+        this.setup_save_cancel();
+
+    },
+
+    /**
+     * Attach listeners and enable the save/cancel buttons.
+     * @protected
+     * @method setup_save_cancel
+     */
+    setup_save_cancel : function() {
+        var cancel = Y.one(SELECTOR.CANCEL),
+            save = Y.one(SELECTOR.SAVE);
+
+        cancel.on('mousedown', this.handle_cancel, this);
+        cancel.on('key', this.handle_cancel, 'down:13', this);
+        cancel.removeAttribute('disabled');
+
+        save.on('mousedown', this.handle_save, this);
+        save.on('key', this.handle_save, 'down:13', this);
+        save.removeAttribute('disabled');
+    },
+
+    /**
+     * Hide the popup - but don't save anything anyqhere.
+     * @protected
+     * @method handle_cancel
+     */
+    handle_cancel : function(e) {
+        e.preventDefault();
+        this.dialogue.hide();
+    },
+
+    /**
+     * Hide the popup - after saving all the edits.
+     * @protected
+     * @method handle_save
+     */
+    handle_save : function(e) {
+        e.preventDefault();
+
+        var ajaxurl = AJAXBASE,
+            config;
+
+        config = {
+            method: 'post',
+            context: this,
+            sync: false,
+            data : {
+                'sesskey' : M.cfg.sesskey,
+                'action' : 'saveallpages',
+                'userid' : this.get('userid'),
+                'attemptnumber' : this.get('attemptnumber'),
+                'assignmentid' : this.get('assignmentid'),
+                'pages' : Y.JSON.stringify(this.pages)
+            },
+            on: {
+                success: function(tid, response) {
+                    var jsondata, downloadlink, deletelink, downloadfilename;
+                    Y.log(response.responseText);
+                    try {
+                        jsondata = Y.JSON.parse(response.responseText);
+                        if (jsondata.error) {
+                            return new M.core.ajaxException(jsondata);
+                        } else {
+
+                            if (jsondata.url) {
+                                // We got a valid response with a url and filename for the generated pdf.
+                                downloadlink = Y.one('#' + this.get('downloadlinkid'));
+                                downloadfilename = Y.one('#' + this.get('downloadlinkid') + ' span');
+                                deletelink = Y.one('#' + this.get('deletelinkid'));
+
+                                // Update the filename and show the download and delete links.
+                                downloadfilename.setHTML(jsondata.filename);
+                                downloadlink.setAttribute('href', jsondata.url);
+                                downloadlink.removeClass('hidden');
+                                deletelink.removeClass('hidden');
+
+                            }
+                            this.dialogue.hide();
+                        }
+                    } catch (e) {
+                        return new M.core.exception(e);
+                    }
+                },
+                failure: function(tid, response) {
+                    return M.core.exception(response.responseText);
+                }
+            }
+        };
+
+        Y.io(ajaxurl, config);
+    },
+
+    /**
+     * Event handler for mousedown or touchstart
+     * @protected
+     * @param Event
+     * @method edit_start
+     */
+    edit_start : function(e) {
+        var offset = Y.one(SELECTOR.DRAWINGCANVAS).getXY(),
+            scrolltop = document.body.scrollTop,
+            scrollleft = document.body.scrollLeft,
+            point = {x : e.clientX - offset[0] + scrollleft,
+                     y : e.clientY - offset[1] + scrolltop};
+
+        if (this.currentedit.starttime) {
+            return;
+        }
+
+        this.currentedit.starttime = new Date().getTime();
+        this.currentedit.start = point;
+        this.currentedit.end = {x : point.x, y : point.y};
+    },
+
+    /**
+     * Generate a drawable from the current in progress edit.
+     * @protected
+     * @method get_current_drawable
+     */
+    get_current_drawable : function() {
+        var drawable = new Drawable(),
+            shape, width, height, x, y;
+
+        if (!this.currentedit.start || !this.currentedit.end) {
+            return false;
+        }
+
+        // Work out the boundary box.
+        x = this.currentedit.start.x;
+        if (this.currentedit.end.x > x) {
+            width = this.currentedit.end.x - x;
+        } else {
+            x = this.currentedit.end.x;
+            width = this.currentedit.start.x - x;
+        }
+        y = this.currentedit.start.y;
+        if (this.currentedit.end.y > y) {
+            height = this.currentedit.end.y - y;
+        } else {
+            y = this.currentedit.end.y;
+            height = this.currentedit.start.y - y;
+        }
+
+        if (this.currenttool === 'comment') {
+            // We will draw a box with the current background colour.
+            shape = this.graphic.addShape({
+                type: Y.Rect,
+                width: width,
+                height: height,
+                fill: {
+                   color: COLOUR[this.currentcolour]
+                },
+                x: x,
+                y: y
+            });
+
+            drawable.shapes.push(shape);
+        }
+
+        return drawable;
+    },
+
+    /**
+     * Delete the shapes from the drawable.
+     * @protected
+     * @method erase_drawable
+     */
+    erase_drawable : function(drawable) {
+        if (drawable.shapes) {
+            while (drawable.shapes.length > 0) {
+                this.graphic.removeShape(drawable.shapes.pop());
+            }
+        }
+        if (drawable.nodes) {
+            while (drawable.nodes.length > 0) {
+                drawable.nodes.pop().remove();
+            }
+        }
+    },
+
+    /**
+     * Redraw the active edit.
+     * @protected
+     * @method redraw_active_edit
+     */
+    redraw_current_edit : function() {
+        if (this.currentdrawable) {
+            this.erase_drawable(this.currentdrawable);
+        }
+        this.currentdrawable = this.get_current_drawable();
+    },
+
+    /**
+     * Event handler for mousemove
+     * @protected
+     * @param Event
+     * @method edit_move
+     */
+    edit_move : function(e) {
+        var offset = Y.one(SELECTOR.DRAWINGCANVAS).getXY(),
+            scrolltop = document.body.scrollTop,
+            scrollleft = document.body.scrollLeft,
+            point = {x : e.clientX - offset[0] + scrollleft,
+                     y : e.clientY - offset[1] + scrolltop};
+
+        if (this.currentedit.start) {
+            this.currentedit.end = point;
+            this.redraw_current_edit();
+        }
+    },
+
+    /**
+     * Event handler for mouseup or touchend
+     * @protected
+     * @param Event
+     * @method edit_end
+     */
+    edit_end : function() {
+        var data,
+            width,
+            height,
+            x,
+            y,
+            duration;
+
+        duration = new Date().getTime() - this.currentedit.start;
+
+        if (duration < CLICKTIMEOUT) {
+            return;
+        }
+        // Work out the boundary box.
+        x = this.currentedit.start.x;
+        if (this.currentedit.end.x > x) {
+            width = this.currentedit.end.x - x;
+        } else {
+            x = this.currentedit.end.x;
+            width = this.currentedit.start.x - x;
+        }
+        y = this.currentedit.start.y;
+        if (this.currentedit.end.y > y) {
+            height = this.currentedit.end.y - y;
+        } else {
+            y = this.currentedit.end.y;
+            height = this.currentedit.start.y - y;
+        }
+
+        // Save the current edit to the server and the current page list.
+
+        if (this.currenttool === 'comment') {
+            if (width < 100) {
+                width = 100;
+            }
+            data = {
+                gradeid : this.get('gradeid'),
+                x : x,
+                y : y,
+                width : width,
+                rawtext : '',
+                pageno : this.currentpage,
+                colour : this.currentcolour
+            };
+
+            this.pages[this.currentpage].comments.push(data);
+            this.drawables.push(this.draw_comment(data));
+        }
+
+        this.currentedit.starttime = 0;
+        this.currentedit.start = false;
+        this.currentedit.end = false;
+        this.erase_drawable(this.currentdrawable);
+        this.currentdrawable = false;
+    },
+
+    /**
+     * Draw an annotation
+     * @protected
+     * @method draw_annotation
+     * @param annotation
+     * @return Drawable
+     */
+    draw_annotation : function(annotation) {
+        var drawable = new Drawable();
+
+        return drawable;
+    },
+
+    /**
+     * Delete a comment from the current page.
+     * @protected
+     * @method delete_comment
+     * @param comment
+     */
+    delete_comment : function(comment) {
+        var i = 0, comments;
+
+        comments = this.pages[this.currentpage].comments;
+        for (i = 0; i < comments.length; i++) {
+            if (comments[i] === comment) {
+                comments.splice(i, 1);
+                this.redraw();
+                return;
+            }
+        }
+    },
+
+    /**
+     * Draw a comment
+     * @protected
+     * @method draw_comment
+     * @param comment
+     * @return Drawable
+     */
+    draw_comment : function(comment) {
+        var drawable = new Drawable(),
+            node,
+            drawingregion = Y.one(SELECTOR.DRAWINGREGION),
+            offsetcanvas = Y.one(SELECTOR.DRAWINGCANVAS).getXY(),
+            offsetdialogue = Y.one(SELECTOR.DIALOGUE).getXY(),
+            offsetleft = offsetcanvas[0] - offsetdialogue[0],
+            offsettop = offsetcanvas[1] - offsetdialogue[1];
+
+        // Lets add a contenteditable div.
+        node = Y.Node.create('<textarea/>');
+        if (comment.width < 60) {
+            comment.width = 60;
+        }
+        node.setStyles({
+            position: 'absolute',
+            left: (parseInt(comment.x, 10) + offsetleft) + 'px',
+            top: (parseInt(comment.y, 10) + offsettop) + 'px',
+            width: comment.width + 'px',
+            backgroundColor: COLOUR[comment.colour],
+            color: 'black',
+            border: '2px solid black',
+            fontSize: '12pt',
+            fontFamily: 'helvetica',
+            minHeight: '1.2em'
+        });
+
+        drawingregion.append(node);
+        drawable.nodes.push(node);
+        node.set('value', comment.rawtext);
+        node.focus();
+        node.on('blur', function() {
+            // Save the changes back to the comment.
+            comment.rawtext = node.get('value');
+            comment.width = parseInt(node.getStyle('width'), 10);
+            // Trim.
+            if (comment.rawtext.replace(/^\s+|\s+$/g, "") === '') {
+                // Delete empty comments.
+                this.delete_comment(comment);
+            }
+
+        }, this);
+
+        return drawable;
+    },
+
+    /**
+     * Redraw all the comments and annotations.
+     * @protected
+     * @method redraw
+     */
+    redraw : function() {
+        var i,
+            page;
+
+        page = this.pages[this.currentpage];
+        while (this.drawables.length > 0) {
+            this.erase_drawable(this.drawables.pop());
+        }
+
+        for (i = 0; i < page.annotations.length; i++) {
+            this.drawables.push(this.draw_annotation(page.annotations[i]));
+        }
+        for (i = 0; i < page.comments.length; i++) {
+            this.drawables.push(this.draw_comment(page.comments[i]));
+        }
+    },
+
+    /**
+     * Load the image for this pdf page and remove the loading icon (if there).
+     * @protected
+     * @method all_pages_loaded
+     */
+    change_page : function() {
+        var drawingcanvas = Y.one(SELECTOR.DRAWINGCANVAS),
+            page;
+
+        page = this.pages[this.currentpage];
+        this.loadingicon.hide();
+        drawingcanvas.setStyle('backgroundImage', 'url("' + page.url + '")');
+
+        this.redraw();
+    },
+
+    /**
+     * Now we know how many pages there are,
+     * we can enable the navigation controls.
+     * @protected
+     * @method all_pages_loaded
+     */
+    setup_navigation : function() {
+        var pageselect,
+            previousbutton,
+            nextbutton,
+            i,
+            option;
+
+        previousbutton = Y.one(SELECTOR.PREVIOUSBUTTON);
+        nextbutton = Y.one(SELECTOR.NEXTBUTTON);
+        pageselect = Y.one(SELECTOR.PAGESELECT);
+
+        if (this.currentpage > 0) {
+            previousbutton.removeAttribute('disabled');
+        } else {
+            previousbutton.setAttribute('disabled', 'true');
+        }
+        if (this.currentpage < (this.pagecount - 1)) {
+            nextbutton.removeAttribute('disabled');
+        } else {
+            nextbutton.setAttribute('disabled', 'true');
+        }
+
+        options = pageselect.all('option');
+        if (options.size() <= 1) {
+            for (i = 0; i < this.pages.length; i++) {
+                option = Y.Node.create('<option/>');
+                option.setAttribute('value', i);
+                option.setHTML((i+1));
+                pageselect.append(option);
+            }
+        }
+        pageselect.removeAttribute('disabled');
+    }
+
+
+
+};
+
+Y.extend(EDITOR, Y.Base, EDITOR.prototype, {
+    NAME : 'moodle-assignfeedback_editpdf-editor',
+    ATTRS : {
+        userid : {
+            validator : Y.Lang.isInteger,
+            value : 0
+        },
+        assignmentid : {
+            validator : Y.Lang.isInteger,
+            value : 0
+        },
+        attemptnumber : {
+            validator : Y.Lang.isInteger,
+            value : 0
+        },
+        header : {
+            validator : Y.Lang.isString,
+            value : ''
+        },
+        body : {
+            validator : Y.Lang.isString,
+            value : ''
+        },
+        footer : {
+            validator : Y.Lang.isString,
+            value : ''
+        },
+        linkid : {
+            validator : Y.Lang.isString,
+            value : ''
+        },
+        deletelinkid : {
+            validator : Y.Lang.isString,
+            value : ''
+        },
+        downloadlinkid : {
+            validator : Y.Lang.isString,
+            value : ''
+        }
+    }
+});
+
+/**
+ * Assignfeedback edit pdf namespace.
+ * @static
+ * @class assignfeedback_editpdf
+ */
+M.assignfeedback_editpdf = M.assignfeedback_editpdf || {};
+
+/**
+ * Editor namespace
+ * @namespace M.assignfeedback_editpdf.editor
+ * @class editor
+ * @static
+ */
+M.assignfeedback_editpdf.editor = M.assignfeedback_editpdf.editor || {};
+
+/**
+ * Init function - will create a new instance every time.
+ * @method init
+ * @static
+ * @param {Object} params
+ */
+M.assignfeedback_editpdf.editor.init = M.assignfeedback_editpdf.editor.init || function(params) {
+    return new EDITOR(params);
+};
+
+
+}, '@VERSION@', {
+    "requires": [
+        "base",
+        "event",
+        "node",
+        "io",
+        "graphics",
+        "json",
+        "querystring-stringify-simple",
+        "moodle-core-notification-dialog",
+        "moodle-core-notification-exception",
+        "moodle-core-notification-ajaxexception"
+    ]
+});
